@@ -24,6 +24,12 @@
 .DS_Store
 *.pem
 
+# generated sales data (not source data — never commit real sales)
+/data/sales_report.csv
+/data/bills.json
+/data/bills.json.*
+/data/sales_report.csv.*
+
 # debug
 npm-debug.log*
 yarn-debug.log*
