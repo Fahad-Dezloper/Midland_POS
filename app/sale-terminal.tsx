@@ -87,14 +87,20 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
   const [assortedIsbn, setAssortedIsbn] = useState("");
   const [assortedNotInList, setAssortedNotInList] = useState(false);
 
+  // Duplicate-item confirm modal
+  const [duplicate, setDuplicate] = useState<{ id: number; name: string } | null>(
+    null,
+  );
+
   const scanRef = useRef<HTMLInputElement>(null);
   const checkoutRef = useRef<HTMLDivElement>(null);
   const assortedRef = useRef<HTMLDivElement>(null);
   const assortedPriceRef = useRef<HTMLInputElement>(null);
+  const duplicateBtnRef = useRef<HTMLButtonElement>(null);
   const nextId = useRef(1);
   const lookupAbort = useRef<AbortController | null>(null);
-  /** Row whose qty cell should grab focus once React has painted it. */
-  const focusQtyOf = useRef<number | null>(null);
+  /** Mirror of `lines` so callbacks can read the current bill without stale closures. */
+  const linesRef = useRef<Line[]>([]);
 
   const focusCell = (id: number, field: Field) => {
     const el = document.getElementById(cellId(id, field));
@@ -104,56 +110,53 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
     }
   };
 
-  // After a scan the new (or bumped) row's qty cell is highlighted, so the
-  // number can be overwritten immediately. The row only exists in the DOM after
-  // the render that follows setLines, hence the ref + effect handshake.
+  // Keep the mirror in sync so callbacks (addBook) can read the current bill.
   useEffect(() => {
-    const id = focusQtyOf.current;
-    if (id == null) return;
-    focusQtyOf.current = null;
-    focusCell(id, "qty");
+    linesRef.current = lines;
   }, [lines]);
 
   /**
-   * Scanning a title already on the bill bumps its quantity instead of opening
-   * a second line — that is what repeatedly scanning a stack means.
+   * Scanning a catalog title already on the bill does not silently bump the
+   * quantity — it opens a confirm modal so the cashier can decide. A brand-new
+   * title is added straight to the top of the bill.
    */
+  /** Replaces the bill, keeping the synchronous mirror in lockstep so the very
+   *  next scan sees current data even before React commits the render. */
+  const commitLines = (next: Line[]) => {
+    linesRef.current = next;
+    setLines(next);
+  };
+
   const addBook = useCallback(
     (book: Book) => {
-      let targetId = 0;
+      const existing = linesRef.current.find(
+        (line) => line.category === "catalog" && line.isbn === book.isbn,
+      );
+      if (existing) {
+        setQuery("");
+        setStatus(null);
+        setDuplicate({ id: existing.id, name: existing.name });
+        return;
+      }
 
-      setLines((current) => {
-        const existing = current.find((line) => line.isbn === book.isbn);
-        if (existing) {
-          targetId = existing.id;
-          const qty = clampQty(existing.qty + 1);
-          return current.map((line) =>
-            line.id === existing.id
-              ? { ...line, qty, qtyDraft: String(qty) }
-              : line,
-          );
-        }
-
-        // A title with its own rule ignores the shop default when it lands on
-        // the bill; either way the line stays editable afterwards.
-        const percent = book.defaultDiscountPercent ?? defaultDiscount;
-        const id = nextId.current++;
-        targetId = id;
-        // Newest book goes on top of the bill.
-        return [
-          {
-            ...book,
-            id,
-            category: "catalog",
-            qty: 1,
-            qtyDraft: "1",
-            priceDraft: paiseToRupeesInput(book.pricePaise),
-            discountPercent: percent,
-            discountDraft: String(percent),
-          },
-          ...current,
-        ];
-      });
+      // A title with its own rule ignores the shop default when it lands on the
+      // bill; either way the line stays editable afterwards.
+      const percent = book.defaultDiscountPercent ?? defaultDiscount;
+      const id = nextId.current++;
+      // Newest book goes on top of the bill.
+      commitLines([
+        {
+          ...book,
+          id,
+          category: "catalog",
+          qty: 1,
+          qtyDraft: "1",
+          priceDraft: paiseToRupeesInput(book.pricePaise),
+          discountPercent: percent,
+          discountDraft: String(percent),
+        },
+        ...linesRef.current,
+      ]);
 
       setQuery("");
       setStatus(
@@ -164,10 +167,48 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
             }
           : { tone: "ok", message: `Added ${book.name}` },
       );
-      focusQtyOf.current = targetId;
+      // Keep focus on the scan box, ready for the next book.
+      scanRef.current?.focus();
     },
     [defaultDiscount],
   );
+
+  /** Bumps the duplicated line's quantity and closes the modal. */
+  const confirmDuplicate = () => {
+    if (!duplicate) return;
+    const { id, name } = duplicate;
+    commitLines(
+      linesRef.current.map((line) => {
+        if (line.id !== id) return line;
+        const qty = clampQty(line.qty + 1);
+        return { ...line, qty, qtyDraft: String(qty) };
+      }),
+    );
+    setDuplicate(null);
+    setStatus({ tone: "ok", message: `Updated quantity for ${name}` });
+    // Back to the scan box for the next book.
+    scanRef.current?.focus();
+  };
+
+  const cancelDuplicate = () => {
+    setDuplicate(null);
+    scanRef.current?.focus();
+  };
+
+  const onDuplicateKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      confirmDuplicate();
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      cancelDuplicate();
+    }
+  };
+
+  // Focus the default "Update quantity" button when the duplicate modal opens.
+  useEffect(() => {
+    if (duplicate) duplicateBtnRef.current?.focus();
+  }, [duplicate]);
 
   /** Adds a walk-in item that is not in the catalog. Never merges into a row. */
   const addAssortedLine = useCallback(
@@ -180,7 +221,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
       const name = opts.name.trim() || defaultAssortedName(opts.category);
       const id = nextId.current++;
 
-      setLines((current) => [
+      commitLines([
         {
           isbn: opts.isbn,
           name,
@@ -195,12 +236,12 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
           discountPercent: defaultDiscount,
           discountDraft: String(defaultDiscount),
         },
-        ...current,
+        ...linesRef.current,
       ]);
 
       setQuery("");
       setStatus({ tone: "ok", message: `Added ${name}` });
-      focusQtyOf.current = id;
+      scanRef.current?.focus();
     },
     [defaultDiscount],
   );
@@ -516,7 +557,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "F3" && event.key !== "F4") return;
       event.preventDefault();
-      if (checkoutOpen || assortedOpen) return;
+      if (checkoutOpen || assortedOpen || duplicate) return;
       const category: ItemCategory =
         event.key === "F3" ? "assorted-books" : "assorted-stationery";
       setAssortedCategory(category);
@@ -528,7 +569,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [checkoutOpen, assortedOpen]);
+  }, [checkoutOpen, assortedOpen, duplicate]);
 
   // Every editable input fills the full width of its column, so its box lines
   // up under the column header. Text alignment and unit padding are added per
@@ -923,6 +964,51 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
           </div>
         </div>
       </div>
+
+      {duplicate && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden"
+          onMouseDown={cancelDuplicate}
+        >
+          <div
+            role="alertdialog"
+            aria-modal="true"
+            aria-label="Book already added"
+            onKeyDown={onDuplicateKeyDown}
+            onMouseDown={(event) => event.stopPropagation()}
+            className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl outline-none"
+          >
+            <h2 className="text-lg font-bold tracking-tight">
+              Already on the <span className="text-accent">bill</span>
+            </h2>
+            <p className="mt-2 text-sm text-neutral-600">
+              <span className="font-medium">{duplicate.name}</span> is already
+              added. Update its quantity instead?
+            </p>
+
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={cancelDuplicate}
+                className="flex-1 rounded-xl border border-neutral-300 px-3 py-2.5 text-sm text-neutral-600 transition hover:bg-neutral-100"
+              >
+                Cancel
+              </button>
+              <button
+                ref={duplicateBtnRef}
+                type="button"
+                onClick={confirmDuplicate}
+                className="flex-1 rounded-xl bg-accent px-3 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 focus:outline-none focus:ring-4 focus:ring-accent/30"
+              >
+                Update quantity
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-neutral-400">
+              Enter to update · Esc to cancel
+            </p>
+          </div>
+        </div>
+      )}
 
       {assortedOpen && (
         <div
