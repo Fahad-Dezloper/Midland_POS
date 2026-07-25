@@ -125,6 +125,16 @@ export default function BillsManager() {
 
   const cancelEdit = () => setEdit(null);
 
+  /** Downloads every bill as one CSV via the server export endpoint. */
+  const downloadAll = () => {
+    const anchor = document.createElement("a");
+    anchor.href = "/api/bills/export";
+    anchor.download = "";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  };
+
   const patchEditLine = (index: number, patch: (line: EditLine) => EditLine) => {
     setEdit((current) =>
       current
@@ -234,6 +244,14 @@ export default function BillsManager() {
         </div>
         <div className="flex items-center gap-3">
           {notice && <span className="text-sm text-neutral-500">{notice}</span>}
+          <button
+            type="button"
+            onClick={downloadAll}
+            disabled={!bills || bills.length === 0}
+            className="rounded-lg border border-accent/40 px-3 py-1.5 text-sm font-medium text-accent transition hover:bg-accent/5 disabled:opacity-40"
+          >
+            Download Excel
+          </button>
           <button
             type="button"
             onClick={() => void reload()}

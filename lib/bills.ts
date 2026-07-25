@@ -24,25 +24,42 @@ import {
 /**
  * JSON-backed bills store — the single source of truth for completed sales.
  *
- * Design notes for durability and speed:
- *  - The whole store is held in memory after the first read, so list/get are
- *    instant and every mutation works on the in-memory array.
+ * The storage backend is pluggable (see `getDriver`):
+ *  - Local / any host with a writable disk → an atomic JSON file under `data/`.
+ *  - Vercel (read-only filesystem) → Vercel Blob, selected automatically when
+ *    `BLOB_READ_WRITE_TOKEN` is set. Same single JSON document, different sink.
+ *
+ * Durability notes:
  *  - Every write goes through one promise chain (`withLock`) so concurrent
- *    requests can never interleave and clobber each other.
- *  - Writes are atomic: content is written to a temp file and `rename`d over the
- *    target, which is atomic on the same filesystem. A crash mid-write leaves
- *    the previous good file intact — the JSON can never be left half-written.
- *  - A corrupt/unreadable file is moved aside (never deleted) and the store
- *    starts empty rather than crashing the app.
- *  - `sales_report.csv` is regenerated from the store on every change, so the
- *    flat report always matches the bills after edits and deletes.
+ *    requests on the same instance can never interleave and clobber each other.
+ *  - Each mutation reads the latest store, applies its change, then writes —
+ *    so it always builds on current data, even across serverless instances.
+ *  - The filesystem backend writes atomically (temp file + rename) so a crash
+ *    mid-write can never leave a half-written file. The Blob backend reads with
+ *    caching disabled and treats "not found" (never "error") as an empty store,
+ *    so a transient failure can never overwrite good data with nothing.
+ *  - A corrupt/unparseable document is backed up (never destroyed) and the
+ *    store starts empty rather than crashing the app.
+ *  - `sales_report.csv` is regenerated from the store on every change (on the
+ *    filesystem backend), so the flat report always matches the bills.
  */
 
 if (typeof window !== "undefined") {
   throw new Error("lib/bills.ts must never be imported into client code");
 }
 
-const DATA_DIR = path.join(process.cwd(), "data");
+/**
+ * Where the writable bills store lives. Defaults to `./data` next to the app.
+ *
+ * On hosts with a read-only filesystem (Vercel, Netlify, most serverless), that
+ * default cannot be written and every sale would fail. Set `MIDLAND_DATA_DIR`
+ * to a writable, persistent path (a mounted volume on a VPS / Railway / Render /
+ * Docker) to fix it. `/tmp` is writable on serverless but ephemeral — data there
+ * is wiped between invocations and deploys, so it is only useful for testing.
+ */
+const DATA_DIR = process.env.MIDLAND_DATA_DIR
+  ? path.resolve(process.env.MIDLAND_DATA_DIR)
+  : path.join(process.cwd(), "data");
 const BILLS_JSON = path.join(DATA_DIR, "bills.json");
 const SALES_CSV = path.join(DATA_DIR, "sales_report.csv");
 const STORE_VERSION = 2;
@@ -107,42 +124,75 @@ function toStored(bill: Bill): StoredBill {
 export class BillValidationError extends Error {}
 export class BillNotFoundError extends Error {}
 
-// ---- In-memory cache ----
+// ---- Storage driver (filesystem locally, Vercel Blob when deployed) ----
 
-let cache: Bill[] | null = null;
-let loadPromise: Promise<Bill[]> | null = null;
+type StoreDriver = {
+  /** Returns the stored JSON string, or null if the store is empty/absent. */
+  readJson(): Promise<string | null>;
+  writeJson(content: string): Promise<void>;
+  writeCsv(content: string): Promise<void>;
+  backupCorrupt(content: string): Promise<void>;
+};
 
-async function load(): Promise<Bill[]> {
-  if (cache) return cache;
-  if (!loadPromise) {
-    loadPromise = readFromDisk()
-      .then((bills) => {
-        cache = bills;
-        loadPromise = null;
-        return bills;
-      })
-      .catch((err) => {
-        loadPromise = null;
-        throw err;
-      });
+let driverPromise: Promise<StoreDriver> | null = null;
+
+function getDriver(): Promise<StoreDriver> {
+  if (!driverPromise) {
+    driverPromise = process.env.BLOB_READ_WRITE_TOKEN
+      ? import("./bills-blob").then((m) => m.createBlobDriver())
+      : Promise.resolve(createFsDriver());
   }
-  return loadPromise;
+  return driverPromise;
 }
 
-async function readFromDisk(): Promise<Bill[]> {
+// --- Filesystem backend ---
+
+let tmpCounter = 0;
+
+async function ensureDir() {
+  if (!existsSync(DATA_DIR)) await mkdir(DATA_DIR, { recursive: true });
+}
+
+async function atomicWrite(target: string, contents: string) {
+  await ensureDir();
+  const tmp = `${target}.tmp-${process.pid}-${tmpCounter++}`;
+  await writeFile(tmp, contents, "utf8");
+  await rename(tmp, target);
+}
+
+function createFsDriver(): StoreDriver {
+  return {
+    async readJson() {
+      if (!existsSync(BILLS_JSON)) return null;
+      return readFile(BILLS_JSON, "utf8");
+    },
+    async writeJson(content) {
+      await atomicWrite(BILLS_JSON, content);
+    },
+    async writeCsv(content) {
+      await atomicWrite(SALES_CSV, content);
+    },
+    async backupCorrupt(content) {
+      try {
+        await atomicWrite(`${BILLS_JSON}.corrupt-${Date.now()}`, content);
+      } catch {
+        // Best effort.
+      }
+    },
+  };
+}
+
+/** Reads and normalises the whole store. Throws only on real read errors (so a
+ *  transient failure can never be mistaken for an empty store). */
+async function readAll(): Promise<Bill[]> {
+  const driver = await getDriver();
+  const raw = await driver.readJson();
+  if (!raw || !raw.trim()) return [];
   try {
-    if (!existsSync(BILLS_JSON)) return [];
-    const raw = await readFile(BILLS_JSON, "utf8");
-    if (!raw.trim()) return [];
     return normalizeStore(JSON.parse(raw));
   } catch {
-    // Corrupt or unreadable: preserve it for forensics, then start clean.
-    try {
-      await ensureDir();
-      await rename(BILLS_JSON, `${BILLS_JSON}.corrupt-${Date.now()}`);
-    } catch {
-      // If even the backup fails there is nothing safe left to do but continue.
-    }
+    // Unparseable: preserve the bad content for forensics, then start clean.
+    await driver.backupCorrupt(raw);
     return [];
   }
 }
@@ -206,10 +256,9 @@ function coerceBill(raw: unknown): Bill | null {
   };
 }
 
-// ---- Serialized, atomic persistence ----
+// ---- Serialized persistence ----
 
 let writeQueue: Promise<unknown> = Promise.resolve();
-let tmpCounter = 0;
 
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = writeQueue.then(fn, fn);
@@ -220,28 +269,17 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
   return run as Promise<T>;
 }
 
-async function ensureDir() {
-  if (!existsSync(DATA_DIR)) await mkdir(DATA_DIR, { recursive: true });
-}
-
-async function atomicWrite(target: string, contents: string) {
-  const tmp = `${target}.tmp-${process.pid}-${tmpCounter++}`;
-  await writeFile(tmp, contents, "utf8");
-  await rename(tmp, target);
-}
-
 async function persist(bills: Bill[]) {
-  await ensureDir();
+  const driver = await getDriver();
   // JSON is canonical — write it first and fail loudly if it can't be saved.
-  await atomicWrite(
-    BILLS_JSON,
+  await driver.writeJson(
     JSON.stringify({ version: STORE_VERSION, bills: bills.map(toStored) }, null, 2),
   );
   // CSV is a derived export — best effort, never fail the sale over it.
   try {
-    await atomicWrite(SALES_CSV, buildCsv(bills));
+    await driver.writeCsv(buildCsv(bills));
   } catch {
-    // Ignore: the canonical store is safe and the CSV will regenerate next time.
+    // Ignore: the canonical store is safe and the CSV regenerates next time.
   }
 }
 
@@ -272,7 +310,7 @@ function csvField(value: string): string {
   return s;
 }
 
-function buildCsv(bills: Bill[]): string {
+export function buildCsv(bills: Bill[]): string {
   const rows = [CSV_HEADER.map(csvField).join(",")];
   for (const bill of bills) {
     const when = new Date(bill.soldAt);
@@ -389,13 +427,13 @@ export async function buildSaleLines(rawLines: unknown): Promise<SaleLineInput[]
 // ---- Public CRUD ----
 
 export async function listBills(): Promise<Bill[]> {
-  const bills = await load();
+  const bills = await readAll();
   // Newest first for the management view.
   return [...bills].sort((a, b) => (a.soldAt < b.soldAt ? 1 : -1));
 }
 
 export async function getBill(orderId: string): Promise<Bill | null> {
-  const bills = await load();
+  const bills = await readAll();
   return bills.find((b) => b.orderId === orderId) ?? null;
 }
 
@@ -409,7 +447,7 @@ export async function createBill(input: {
   }
 
   return withLock(async () => {
-    const bills = await load();
+    const bills = await readAll();
     const now = new Date();
     const bill: Bill = {
       orderId: genOrderId(now, bills),
@@ -418,9 +456,7 @@ export async function createBill(input: {
       lines,
       totals: computeTotals(lines),
     };
-    const next = [...bills, bill];
-    await persist(next);
-    cache = next;
+    await persist([...bills, bill]);
     return bill;
   });
 }
@@ -435,7 +471,7 @@ export async function updateBill(
   }
 
   return withLock(async () => {
-    const bills = await load();
+    const bills = await readAll();
     const index = bills.findIndex((b) => b.orderId === orderId);
     if (index === -1) throw new BillNotFoundError(orderId);
 
@@ -449,18 +485,16 @@ export async function updateBill(
     const next = bills.slice();
     next[index] = updated;
     await persist(next);
-    cache = next;
     return updated;
   });
 }
 
 export async function deleteBill(orderId: string): Promise<boolean> {
   return withLock(async () => {
-    const bills = await load();
+    const bills = await readAll();
     const next = bills.filter((b) => b.orderId !== orderId);
     if (next.length === bills.length) return false;
     await persist(next);
-    cache = next;
     return true;
   });
 }

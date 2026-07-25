@@ -38,6 +38,8 @@ export async function POST(request: NextRequest) {
     if (error instanceof BillValidationError) {
       return Response.json({ error: error.message }, { status: 400 });
     }
+    // Surface the real cause (e.g. EROFS/EACCES on a read-only host) in logs.
+    console.error("[/api/sales] failed to record sale:", error);
     return Response.json({ error: "Could not record the sale" }, { status: 500 });
   }
 }

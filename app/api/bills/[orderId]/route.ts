@@ -74,6 +74,7 @@ export async function PUT(
     if (error instanceof BillValidationError) {
       return Response.json({ error: error.message }, { status: 400 });
     }
+    console.error("[/api/bills PUT] failed to update bill:", error);
     return Response.json({ error: "Could not update the bill" }, { status: 500 });
   }
 }
@@ -93,7 +94,8 @@ export async function DELETE(
       return Response.json({ error: "Bill not found" }, { status: 404 });
     }
     return Response.json({ ok: true }, { headers: { "Cache-Control": "no-store" } });
-  } catch {
+  } catch (error) {
+    console.error("[/api/bills DELETE] failed to delete bill:", error);
     return Response.json({ error: "Could not delete the bill" }, { status: 500 });
   }
 }
