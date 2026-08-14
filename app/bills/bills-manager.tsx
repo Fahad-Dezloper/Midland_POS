@@ -29,6 +29,8 @@ type EditLine = {
   priceDraft: string;
   discountPercent: number;
   discountDraft: string;
+  /** GST rate for stationery, preserved on edit (not editable here). */
+  gstPercent: number | null;
 };
 
 type EditState = {
@@ -50,6 +52,7 @@ function toEditLines(bill: Bill): EditLine[] {
     priceDraft: paiseToRupeesInput(l.unitPricePaise),
     discountPercent: l.discountPercent,
     discountDraft: String(l.discountPercent),
+    gstPercent: l.gstPercent ?? null,
   }));
 }
 
@@ -172,6 +175,7 @@ export default function BillsManager() {
             qty: l.qty,
             unitPricePaise: l.unitPricePaise,
             discountPercent: l.discountPercent,
+            gstPercent: l.gstPercent,
           })),
         }),
       });
@@ -348,6 +352,12 @@ export default function BillsManager() {
                               <span className="text-discount">
                                 {" "}
                                 (−{l.discountPercent}%)
+                              </span>
+                            )}
+                            {l.gstPercent != null && (
+                              <span className="text-accent">
+                                {" "}
+                                · GST {l.gstPercent}%
                               </span>
                             )}
                           </span>

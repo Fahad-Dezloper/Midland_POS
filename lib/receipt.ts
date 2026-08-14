@@ -22,6 +22,7 @@ export type ReceiptBill = {
     grossPaise: number;
     discountPaise: number;
     netPaise: number;
+    gstPercent?: number | null;
   }[];
   totals: {
     beforePaise: number;
@@ -44,8 +45,8 @@ const escapeHtml = (value: string) =>
       })[c] as string,
   );
 
-/** Builds a self-contained HTML receipt and saves it to the user's machine. */
-export function downloadReceipt(sale: ReceiptBill) {
+/** Builds the self-contained HTML document for a receipt. */
+function buildReceiptHtml(sale: ReceiptBill): string {
   const when = new Date(sale.soldAt).toLocaleString("en-IN", {
     dateStyle: "medium",
     timeStyle: "short",
@@ -55,7 +56,11 @@ export function downloadReceipt(sale: ReceiptBill) {
     .map(
       (l) => `
       <tr>
-        <td>${escapeHtml(l.name)}<div class="isbn">${escapeHtml(l.isbn || "—")}</div></td>
+        <td>${escapeHtml(l.name)}<div class="isbn">${escapeHtml(l.isbn || "—")}</div>${
+          l.gstPercent != null
+            ? `<div class="gst">Incl. GST ${l.gstPercent}%</div>`
+            : ""
+        }</td>
         <td class="num">${l.qty}</td>
         <td class="num">${formatPaise(l.unitPricePaise)}</td>
         <td class="num">${l.discountPercent}%</td>
@@ -64,7 +69,7 @@ export function downloadReceipt(sale: ReceiptBill) {
     )
     .join("");
 
-  const html = `<!doctype html>
+  return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8" />
@@ -82,6 +87,7 @@ export function downloadReceipt(sale: ReceiptBill) {
   th { color: #1d4ed8; text-transform: uppercase; font-size: 11px; letter-spacing: .04em; }
   .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
   .isbn { color: #888; font-size: 11px; font-variant-numeric: tabular-nums; }
+  .gst { color: #1d4ed8; font-size: 11px; font-weight: 600; }
   .totals { margin-top: 16px; margin-left: auto; width: 260px; font-size: 14px; }
   .totals div { display: flex; justify-content: space-between; padding: 2px 0; }
   .totals .discount { color: #ef4444; }
@@ -111,7 +117,11 @@ export function downloadReceipt(sale: ReceiptBill) {
   <div class="pay">Paid by <b>${escapeHtml(sale.paymentMethod)}</b> · ${sale.totals.units} item${sale.totals.units === 1 ? "" : "s"}</div>
 </body>
 </html>`;
+}
 
+/** Builds a self-contained HTML receipt and saves it to the user's machine. */
+export function downloadReceipt(sale: ReceiptBill) {
+  const html = buildReceiptHtml(sale);
   const blob = new Blob([html], { type: "text/html;charset=utf-8" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
@@ -121,4 +131,47 @@ export function downloadReceipt(sale: ReceiptBill) {
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+/**
+ * Opens the browser's print dialog for the receipt, sending it straight to the
+ * connected printer. The receipt is rendered into an off-screen iframe so the
+ * POS page itself is never disturbed; the iframe is cleaned up after printing.
+ */
+export function printReceipt(sale: ReceiptBill) {
+  const html = buildReceiptHtml(sale);
+
+  const iframe = document.createElement("iframe");
+  iframe.setAttribute("aria-hidden", "true");
+  iframe.style.position = "fixed";
+  iframe.style.right = "0";
+  iframe.style.bottom = "0";
+  iframe.style.width = "0";
+  iframe.style.height = "0";
+  iframe.style.border = "0";
+  iframe.style.visibility = "hidden";
+
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
+    iframe.remove();
+  };
+
+  iframe.onload = () => {
+    const win = iframe.contentWindow;
+    if (!win) {
+      cleanup();
+      return;
+    }
+    // Remove the iframe once the print dialog is dismissed. A long fallback
+    // covers browsers that never fire `afterprint`.
+    win.onafterprint = () => window.setTimeout(cleanup, 200);
+    window.setTimeout(cleanup, 60_000);
+    win.focus();
+    win.print();
+  };
+
+  document.body.appendChild(iframe);
+  iframe.srcdoc = html;
 }

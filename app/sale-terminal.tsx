@@ -3,6 +3,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import {
+  DEFAULT_GST_PERCENT,
+  GST_RATES,
+  type GstRate,
   type ItemCategory,
   defaultAssortedName,
   sanitizeItemCode,
@@ -10,7 +13,7 @@ import {
 import { DEFAULT_DISCOUNT_PERCENT } from "@/lib/discount-rules";
 import { normalizeIsbn } from "@/lib/isbn";
 import { PAYMENT_METHODS } from "@/lib/payment";
-import { type ReceiptBill, downloadReceipt } from "@/lib/receipt";
+import { type ReceiptBill, downloadReceipt, printReceipt } from "@/lib/receipt";
 import {
   MAX_DISCOUNT_PERCENT,
   MAX_PRICE_PAISE,
@@ -39,6 +42,8 @@ type Line = Book & {
   category: ItemCategory;
   qty: number;
   discountPercent: number;
+  /** GST rate (%) for assorted stationery; null otherwise. Reference only. */
+  gstPercent: number | null;
   /**
    * What the user is currently typing in each editable cell. Kept apart from
    * the numeric values so a field can be emptied or hold "12." mid-edit without
@@ -71,6 +76,10 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
   );
   const [status, setStatus] = useState<Status>(null);
   const [busy, setBusy] = useState(false);
+  /** The last recorded sale, kept so the cashier can (re)print its receipt. */
+  const [lastSale, setLastSale] = useState<ReceiptBill | null>(null);
+  /** The sale just completed, shown in a centered "print receipt" modal. */
+  const [justSold, setJustSold] = useState<ReceiptBill | null>(null);
 
   // Checkout modal
   const [checkoutOpen, setCheckoutOpen] = useState(false);
@@ -85,6 +94,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
   const [assortedName, setAssortedName] = useState("");
   const [assortedPriceDraft, setAssortedPriceDraft] = useState("");
   const [assortedIsbn, setAssortedIsbn] = useState("");
+  const [assortedGst, setAssortedGst] = useState<GstRate>(DEFAULT_GST_PERCENT);
   const [assortedNotInList, setAssortedNotInList] = useState(false);
 
   // Duplicate-item confirm modal
@@ -97,6 +107,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
   const assortedRef = useRef<HTMLDivElement>(null);
   const assortedPriceRef = useRef<HTMLInputElement>(null);
   const duplicateBtnRef = useRef<HTMLButtonElement>(null);
+  const printBtnRef = useRef<HTMLButtonElement>(null);
   const nextId = useRef(1);
   const lookupAbort = useRef<AbortController | null>(null);
   /** Mirror of `lines` so callbacks can read the current bill without stale closures. */
@@ -154,6 +165,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
           priceDraft: paiseToRupeesInput(book.pricePaise),
           discountPercent: percent,
           discountDraft: String(percent),
+          gstPercent: null,
         },
         ...linesRef.current,
       ]);
@@ -210,6 +222,27 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
     if (duplicate) duplicateBtnRef.current?.focus();
   }, [duplicate]);
 
+  /** Close the post-sale print modal and return to scanning the next bill. */
+  const closePrintModal = () => {
+    setJustSold(null);
+    scanRef.current?.focus();
+  };
+
+  const onPrintModalKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (justSold) printReceipt(justSold);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      closePrintModal();
+    }
+  };
+
+  // Focus the Print button when the post-sale modal opens (Enter prints).
+  useEffect(() => {
+    if (justSold) printBtnRef.current?.focus();
+  }, [justSold]);
+
   /** Adds a walk-in item that is not in the catalog. Never merges into a row. */
   const addAssortedLine = useCallback(
     (opts: {
@@ -217,6 +250,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
       name: string;
       pricePaise: number;
       isbn: string;
+      gstPercent: GstRate;
     }) => {
       const name = opts.name.trim() || defaultAssortedName(opts.category);
       const id = nextId.current++;
@@ -235,6 +269,9 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
           priceDraft: paiseToRupeesInput(opts.pricePaise),
           discountPercent: defaultDiscount,
           discountDraft: String(defaultDiscount),
+          // GST is recorded for stationery only; it does not change the price.
+          gstPercent:
+            opts.category === "assorted-stationery" ? opts.gstPercent : null,
         },
         ...linesRef.current,
       ]);
@@ -276,6 +313,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
           setAssortedName("");
           setAssortedPriceDraft("");
           setAssortedIsbn(isbn);
+          setAssortedGst(DEFAULT_GST_PERCENT);
           setAssortedNotInList(true);
           setAssortedOpen(true);
           return;
@@ -436,6 +474,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
             qty: l.qty,
             unitPricePaise: l.pricePaise,
             discountPercent: l.discountPercent,
+            gstPercent: l.gstPercent,
           })),
         }),
       });
@@ -450,6 +489,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
 
       const sale: ReceiptBill = await response.json();
       downloadReceipt(sale);
+      setLastSale(sale);
 
       setCheckoutOpen(false);
       setLines([]);
@@ -459,7 +499,8 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
         tone: "ok",
         message: `Sale ${sale.orderId} recorded — receipt downloaded.`,
       });
-      scanRef.current?.focus();
+      // Offer to print straight away in a centered modal.
+      setJustSold(sale);
     } catch {
       setCheckoutError("Network error. Please try again.");
     } finally {
@@ -510,6 +551,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
     setAssortedName("");
     setAssortedPriceDraft("");
     setAssortedIsbn("");
+    setAssortedGst(DEFAULT_GST_PERCENT);
     setAssortedNotInList(false);
     setAssortedOpen(true);
   };
@@ -533,6 +575,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
       name: assortedName,
       pricePaise: assortedPricePaise,
       isbn: sanitizeItemCode(assortedIsbn),
+      gstPercent: assortedGst,
     });
     setAssortedOpen(false);
   };
@@ -557,19 +600,20 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "F3" && event.key !== "F4") return;
       event.preventDefault();
-      if (checkoutOpen || assortedOpen || duplicate) return;
+      if (checkoutOpen || assortedOpen || duplicate || justSold) return;
       const category: ItemCategory =
         event.key === "F3" ? "assorted-books" : "assorted-stationery";
       setAssortedCategory(category);
       setAssortedName("");
       setAssortedPriceDraft("");
       setAssortedIsbn("");
+      setAssortedGst(DEFAULT_GST_PERCENT);
       setAssortedNotInList(false);
       setAssortedOpen(true);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [checkoutOpen, assortedOpen, duplicate]);
+  }, [checkoutOpen, assortedOpen, duplicate, justSold]);
 
   // Every editable input fills the full width of its column, so its box lines
   // up under the column header. Text alignment and unit padding are added per
@@ -665,19 +709,46 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
         aria-live="polite"
       > */}
       {/* {busy && <span className="text-neutral-500">Looking up…</span>} */}
-      {!busy && status && (
-        <span
-          className={
-            status.tone === "error"
-              ? "text-discount"
-              : status.tone === "warn"
-                ? "font-medium text-discount"
-                : "text-neutral-500"
-          }
-        >
-          {status.message}
-        </span>
-      )}
+      <div className="-mt-2 flex shrink-0 flex-wrap items-center gap-3 text-xs print:hidden xl:text-sm">
+        {!busy && status && (
+          <span
+            className={
+              status.tone === "error"
+                ? "text-discount"
+                : status.tone === "warn"
+                  ? "font-medium text-discount"
+                  : "text-neutral-500"
+            }
+          >
+            {status.message}
+          </span>
+        )}
+        {lastSale && (
+          <button
+            type="button"
+            onClick={() => printReceipt(lastSale)}
+            title={`Print receipt for ${lastSale.orderId}`}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-accent/40 px-3 py-1.5 font-medium text-accent transition hover:bg-accent/5 focus:outline-none focus:ring-2 focus:ring-accent/30"
+          >
+            <svg
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth={2}
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              className="h-4 w-4"
+              aria-hidden="true"
+            >
+              <path d="M6 9V2h12v7" />
+              <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+              <path d="M6 14h12v8H6z" />
+            </svg>
+            Print receipt
+            <span className="text-neutral-400">({lastSale.orderId})</span>
+          </button>
+        )}
+      </div>
       {/* </p> */}
 
       {/* Bill */}
@@ -750,6 +821,11 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
                       {assortedLabel && (
                         <span className="ml-2 rounded bg-accent/10 px-1.5 py-0.5 align-middle text-[10px] font-medium uppercase tracking-wide text-accent">
                           {assortedLabel}
+                        </span>
+                      )}
+                      {line.gstPercent != null && (
+                        <span className="ml-2 rounded border border-accent/30 px-1.5 py-0.5 align-middle text-[10px] font-medium uppercase tracking-wide text-accent">
+                          GST {line.gstPercent}%
                         </span>
                       )}
                     </td>
@@ -965,6 +1041,82 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
         </div>
       </div>
 
+      {justSold && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden"
+          onMouseDown={closePrintModal}
+        >
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Sale recorded"
+            onKeyDown={onPrintModalKeyDown}
+            onMouseDown={(event) => event.stopPropagation()}
+            className="w-full max-w-sm rounded-2xl bg-white p-6 text-center shadow-2xl outline-none"
+          >
+            <div className="mx-auto flex h-12 w-12 items-center justify-center rounded-full bg-accent/10 text-accent">
+              <svg
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth={2}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                className="h-6 w-6"
+                aria-hidden="true"
+              >
+                <path d="M20 6 9 17l-5-5" />
+              </svg>
+            </div>
+            <h2 className="mt-3 text-lg font-bold tracking-tight">
+              Sale <span className="text-accent">recorded</span>
+            </h2>
+            <p className="mt-1 text-sm text-neutral-600">
+              Order <span className="font-medium">{justSold.orderId}</span> ·{" "}
+              {formatPaise(justSold.totals.afterPaise)}
+            </p>
+            <p className="mt-0.5 text-xs text-neutral-400">
+              Receipt downloaded. Print it for the customer?
+            </p>
+
+            <div className="mt-5 flex gap-2">
+              <button
+                type="button"
+                onClick={closePrintModal}
+                className="flex-1 rounded-xl border border-neutral-300 px-3 py-2.5 text-sm text-neutral-600 transition hover:bg-neutral-100"
+              >
+                Done
+              </button>
+              <button
+                ref={printBtnRef}
+                type="button"
+                onClick={() => printReceipt(justSold)}
+                className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-xl bg-accent px-3 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-accent/90 focus:outline-none focus:ring-4 focus:ring-accent/30"
+              >
+                <svg
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth={2}
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  className="h-4 w-4"
+                  aria-hidden="true"
+                >
+                  <path d="M6 9V2h12v7" />
+                  <path d="M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2" />
+                  <path d="M6 14h12v8H6z" />
+                </svg>
+                Print receipt
+              </button>
+            </div>
+            <p className="mt-2 text-xs text-neutral-400">
+              Enter to print · Esc to close
+            </p>
+          </div>
+        </div>
+      )}
+
       {duplicate && (
         <div
           className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4 print:hidden"
@@ -1066,6 +1218,42 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
                 );
               })}
             </div>
+
+            {assortedCategory === "assorted-stationery" && (
+              <div className="mt-4">
+                <p className="block text-xs font-medium uppercase tracking-wide text-neutral-500">
+                  GST rate
+                </p>
+                <div
+                  role="radiogroup"
+                  aria-label="GST rate"
+                  className="mt-1 grid grid-cols-3 gap-2"
+                >
+                  {GST_RATES.map((rate) => {
+                    const selected = assortedGst === rate;
+                    return (
+                      <button
+                        key={rate}
+                        type="button"
+                        role="radio"
+                        aria-checked={selected}
+                        onClick={() => setAssortedGst(rate)}
+                        className={`rounded-xl border-2 px-3 py-2 text-sm font-semibold transition ${
+                          selected
+                            ? "border-accent bg-accent text-white"
+                            : "border-neutral-200 bg-white text-neutral-600 hover:border-accent/40"
+                        }`}
+                      >
+                        {rate}%
+                      </button>
+                    );
+                  })}
+                </div>
+                <p className="mt-1 text-xs text-neutral-400">
+                  Printed on the bill for reference — the price you enter is final.
+                </p>
+              </div>
+            )}
 
             <label
               htmlFor="assorted-isbn"

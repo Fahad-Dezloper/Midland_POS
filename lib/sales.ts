@@ -30,9 +30,15 @@ export type SaleLineInput = {
   qty: number;
   unitPricePaise: number;
   discountPercent: number;
+  /**
+   * GST rate (%) for assorted stationery, recorded for reference only — it never
+   * changes the price. `null` for every other kind of line.
+   */
+  gstPercent?: number | null;
 };
 
 export type SaleLine = SaleLineInput & {
+  gstPercent: number | null;
   grossPaise: number;
   discountPaise: number;
   netPaise: number;
@@ -62,6 +68,9 @@ export function computeLines(inputs: SaleLineInput[]): SaleLine[] {
       qty,
       unitPricePaise,
       discountPercent,
+      // GST applies to assorted stationery only; ignore it elsewhere.
+      gstPercent:
+        l.category === "assorted-stationery" ? (l.gstPercent ?? null) : null,
       grossPaise: gross,
       discountPaise: off,
       netPaise: net,

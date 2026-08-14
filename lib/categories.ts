@@ -42,6 +42,27 @@ export function defaultAssortedName(category: ItemCategory): string {
     : "Assorted Book";
 }
 
+/**
+ * GST rates offered for assorted stationery. The price the cashier enters is the
+ * final, GST-inclusive price — the rate is recorded and printed for reference
+ * only and never changes the amount charged.
+ */
+export const GST_RATES = [5, 12, 18] as const;
+export type GstRate = (typeof GST_RATES)[number];
+export const DEFAULT_GST_PERCENT: GstRate = 5;
+
+export function isGstRate(value: unknown): value is GstRate {
+  return (
+    typeof value === "number" && (GST_RATES as readonly number[]).includes(value)
+  );
+}
+
+/** Coerces any input to a valid GST rate, defaulting to 5%. */
+export function normalizeGstRate(value: unknown): GstRate {
+  const n = Number(value);
+  return isGstRate(n) ? n : DEFAULT_GST_PERCENT;
+}
+
 /** Longest assorted name we will store. */
 export const MAX_ASSORTED_NAME = 120;
 

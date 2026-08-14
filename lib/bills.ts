@@ -8,6 +8,7 @@ import {
   categoryLabel,
   defaultAssortedName,
   isItemCategory,
+  normalizeGstRate,
   sanitizeItemCode,
 } from "./categories";
 import { normalizeIsbn } from "./isbn";
@@ -83,6 +84,8 @@ type StoredLine = {
   discountPercent: number;
   discountAmount: number;
   lineTotal: number;
+  /** GST rate for assorted stationery; omitted for other lines. */
+  gstPercent?: number;
 };
 
 type StoredBill = {
@@ -110,6 +113,7 @@ function toStored(bill: Bill): StoredBill {
       discountPercent: l.discountPercent,
       discountAmount: toRupees(l.discountPaise),
       lineTotal: toRupees(l.netPaise),
+      ...(l.gstPercent != null ? { gstPercent: l.gstPercent } : {}),
     })),
     totals: {
       subtotal: toRupees(bill.totals.beforePaise),
@@ -232,13 +236,18 @@ function coerceBill(raw: unknown): Bill | null {
       typeof l.unitPrice !== "undefined"
         ? rupeesToPaiseSafe(l.unitPrice)
         : Number(l.unitPricePaise) || 0;
+    const category = isItemCategory(l.category) ? l.category : "catalog";
     inputs.push({
       isbn: typeof l.isbn === "string" ? l.isbn : "",
       name: typeof l.name === "string" ? l.name : "",
-      category: isItemCategory(l.category) ? l.category : "catalog",
+      category,
       qty: Number(l.qty),
       unitPricePaise,
       discountPercent: Number(l.discountPercent),
+      gstPercent:
+        category === "assorted-stationery" && l.gstPercent != null
+          ? normalizeGstRate(l.gstPercent)
+          : null,
     });
   }
   if (inputs.length === 0) return null;
@@ -297,6 +306,7 @@ const CSV_HEADER = [
   "Discount %",
   "Discount (INR)",
   "Line Total (INR)",
+  "GST %",
   "Payment Method",
 ];
 
@@ -334,6 +344,7 @@ export function buildCsv(bills: Bill[]): string {
           String(c.discountPercent),
           rupees(c.discountPaise),
           rupees(c.netPaise),
+          c.gstPercent != null ? String(c.gstPercent) : "",
           bill.paymentMethod,
         ]
           .map(csvField)
@@ -383,6 +394,7 @@ export async function buildSaleLines(rawLines: unknown): Promise<SaleLineInput[]
       qty?: unknown;
       unitPricePaise?: unknown;
       discountPercent?: unknown;
+      gstPercent?: unknown;
     };
 
     const category = isItemCategory(item.category) ? item.category : "catalog";
@@ -418,7 +430,20 @@ export async function buildSaleLines(rawLines: unknown): Promise<SaleLineInput[]
       throw new BillValidationError("Invalid line values");
     }
 
-    lines.push({ isbn, name, category, qty, unitPricePaise, discountPercent });
+    const gstPercent =
+      category === "assorted-stationery"
+        ? normalizeGstRate(item.gstPercent)
+        : null;
+
+    lines.push({
+      isbn,
+      name,
+      category,
+      qty,
+      unitPricePaise,
+      discountPercent,
+      gstPercent,
+    });
   }
 
   return lines;
