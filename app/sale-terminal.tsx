@@ -1,7 +1,19 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
+import {
+  type BillSource,
+  DEFAULT_BILL_SOURCE,
+  isBillSource,
+} from "@/lib/bill-source";
 import {
   DEFAULT_GST_PERCENT,
   GST_RATES,
@@ -61,6 +73,46 @@ type Field = "qty" | "price" | "discount";
 const cellId = (id: number, field: Field) => `cell-${id}-${field}`;
 const SELL_BUTTON_ID = "sell-button";
 
+/**
+ * Store/Event mode is persisted in localStorage and read through
+ * `useSyncExternalStore`, so it survives reloads and stays in sync across tabs
+ * without a hydration mismatch or a setState-in-effect.
+ */
+const SOURCE_KEY = "midland.bill-source";
+const sourceListeners = new Set<() => void>();
+
+function subscribeBillSource(callback: () => void) {
+  sourceListeners.add(callback);
+  window.addEventListener("storage", callback);
+  return () => {
+    sourceListeners.delete(callback);
+    window.removeEventListener("storage", callback);
+  };
+}
+
+function getBillSourceSnapshot(): BillSource {
+  try {
+    const value = window.localStorage.getItem(SOURCE_KEY);
+    return isBillSource(value) ? value : DEFAULT_BILL_SOURCE;
+  } catch {
+    return DEFAULT_BILL_SOURCE;
+  }
+}
+
+function getBillSourceServerSnapshot(): BillSource {
+  return DEFAULT_BILL_SOURCE;
+}
+
+function setBillSource(next: BillSource) {
+  try {
+    window.localStorage.setItem(SOURCE_KEY, next);
+  } catch {
+    // Storage disabled — the choice just won't persist across reloads.
+  }
+  // `storage` doesn't fire in the same tab, so notify local subscribers.
+  sourceListeners.forEach((listener) => listener());
+}
+
 /** Per-line money, derived rather than stored so it can never drift. */
 const lineTotals = (line: Line) =>
   lineAmounts(line.pricePaise, line.qty, line.discountPercent);
@@ -76,6 +128,16 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
   );
   const [status, setStatus] = useState<Status>(null);
   const [busy, setBusy] = useState(false);
+  /**
+   * Store vs Event mode. Persisted so it stays put across reloads — every bill
+   * created while this is "event" is tagged as an event sale. It is only a label
+   * and never changes prices or totals.
+   */
+  const source = useSyncExternalStore(
+    subscribeBillSource,
+    getBillSourceSnapshot,
+    getBillSourceServerSnapshot,
+  );
   /** The last recorded sale, kept so the cashier can (re)print its receipt. */
   const [lastSale, setLastSale] = useState<ReceiptBill | null>(null);
   /** The sale just completed, shown in a centered "print receipt" modal. */
@@ -467,6 +529,7 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           paymentMethod: PAYMENT_METHODS[paymentIndex],
+          source,
           lines: lines.map((l) => ({
             isbn: l.isbn,
             name: l.name,
@@ -667,6 +730,45 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
           + Assorted stationery <span className="text-neutral-400">(F4)</span>
         </button>
 
+        <div className="flex items-center gap-2 rounded-xl border border-neutral-200 bg-neutral-50 px-2 py-1.5">
+          <span className="pl-1 text-xs font-medium uppercase tracking-wide text-neutral-500 xl:text-sm">
+            Mode
+          </span>
+          <div
+            role="radiogroup"
+            aria-label="Sale mode"
+            className="flex gap-1"
+          >
+            {(
+              [
+                ["store", "Store"],
+                ["event", "Event"],
+              ] as const
+            ).map(([value, label]) => {
+              const selected = source === value;
+              const isEvent = value === "event";
+              return (
+                <button
+                  key={value}
+                  type="button"
+                  role="radio"
+                  aria-checked={selected}
+                  onClick={() => setBillSource(value)}
+                  className={`rounded-lg border-2 px-3 py-1.5 text-sm font-semibold transition ${
+                    selected
+                      ? isEvent
+                        ? "border-discount bg-discount text-white"
+                        : "border-accent bg-accent text-white"
+                      : "border-neutral-200 bg-white text-neutral-600 hover:border-accent/40"
+                  }`}
+                >
+                  {label}
+                </button>
+              );
+            })}
+          </div>
+        </div>
+
         <div className="flex items-center gap-2 rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2.5 xl:px-4 xl:py-3">
           <label
             htmlFor="default-discount"
@@ -710,6 +812,12 @@ export default function SaleTerminal({ catalogSize }: { catalogSize: number }) {
       > */}
       {/* {busy && <span className="text-neutral-500">Looking up…</span>} */}
       <div className="-mt-2 flex shrink-0 flex-wrap items-center gap-3 text-xs print:hidden xl:text-sm">
+        {source === "event" && (
+          <span className="inline-flex items-center gap-1.5 rounded-full bg-discount/10 px-2.5 py-1 font-semibold text-discount">
+            <span className="h-1.5 w-1.5 rounded-full bg-discount" />
+            Event mode — new bills tagged Event
+          </span>
+        )}
         {!busy && status && (
           <span
             className={

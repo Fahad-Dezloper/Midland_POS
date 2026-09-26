@@ -1,5 +1,6 @@
 import type { NextRequest } from "next/server";
 
+import { normalizeBillSource } from "@/lib/bill-source";
 import { BillValidationError, buildSaleLines, createBill } from "@/lib/bills";
 import { isPaymentMethod } from "@/lib/payment";
 import { clientKey, rateLimit } from "@/lib/rate-limit";
@@ -24,7 +25,11 @@ export async function POST(request: NextRequest) {
     return Response.json({ error: "Invalid JSON" }, { status: 400 });
   }
 
-  const payload = body as { paymentMethod?: unknown; lines?: unknown };
+  const payload = body as {
+    paymentMethod?: unknown;
+    lines?: unknown;
+    source?: unknown;
+  };
 
   if (!isPaymentMethod(payload.paymentMethod)) {
     return Response.json({ error: "Invalid payment method" }, { status: 400 });
@@ -47,6 +52,7 @@ export async function POST(request: NextRequest) {
     const bill = await createBill({
       lines,
       paymentMethod: payload.paymentMethod,
+      source: normalizeBillSource(payload.source),
     });
     return Response.json(bill, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {

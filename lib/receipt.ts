@@ -1,3 +1,4 @@
+import type { BillSource } from "./bill-source";
 import type { ItemCategory } from "./categories";
 import { formatPaise } from "./money";
 import type { PaymentMethod } from "./payment";
@@ -11,6 +12,7 @@ export type ReceiptBill = {
   orderId: string;
   soldAt: string;
   updatedAt?: string;
+  source?: BillSource;
   paymentMethod: PaymentMethod;
   lines: {
     isbn: string;
@@ -114,7 +116,9 @@ function buildReceiptHtml(sale: ReceiptBill): string {
     <div class="discount"><span>Discount</span><span>-${formatPaise(sale.totals.discountPaise)}</span></div>
     <div class="grand"><span>Total</span><span>${formatPaise(sale.totals.afterPaise)}</span></div>
   </div>
-  <div class="pay">Paid by <b>${escapeHtml(sale.paymentMethod)}</b> · ${sale.totals.units} item${sale.totals.units === 1 ? "" : "s"}</div>
+  <div class="pay">Paid by <b>${escapeHtml(sale.paymentMethod)}</b> · ${sale.totals.units} item${sale.totals.units === 1 ? "" : "s"}${
+    sale.source === "event" ? ' · <b>Event sale</b>' : ""
+  }</div>
 </body>
 </html>`;
 }

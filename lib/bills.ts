@@ -2,6 +2,12 @@ import { existsSync } from "node:fs";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  type BillSource,
+  DEFAULT_BILL_SOURCE,
+  billSourceLabel,
+  normalizeBillSource,
+} from "./bill-source";
 import { findByIsbn } from "./catalog";
 import {
   MAX_ASSORTED_NAME,
@@ -92,6 +98,8 @@ type StoredBill = {
   orderId: string;
   soldAt: string;
   updatedAt?: string;
+  /** "store" | "event"; absent on bills written before this field existed. */
+  source?: string;
   paymentMethod: string;
   lines: StoredLine[];
   totals: { subtotal: number; discount: number; total: number; units: number };
@@ -103,6 +111,7 @@ function toStored(bill: Bill): StoredBill {
     orderId: bill.orderId,
     soldAt: bill.soldAt,
     ...(bill.updatedAt ? { updatedAt: bill.updatedAt } : {}),
+    source: bill.source,
     paymentMethod: bill.paymentMethod,
     lines: bill.lines.map((l) => ({
       isbn: l.isbn,
@@ -259,6 +268,8 @@ function coerceBill(raw: unknown): Bill | null {
     orderId: b.orderId,
     soldAt: b.soldAt,
     updatedAt: typeof b.updatedAt === "string" ? b.updatedAt : undefined,
+    // Legacy bills predate this field — treat them as normal store sales.
+    source: normalizeBillSource(b.source),
     paymentMethod: b.paymentMethod,
     lines,
     totals: computeTotals(lines),
@@ -308,6 +319,7 @@ const CSV_HEADER = [
   "Line Total (INR)",
   "GST %",
   "Payment Method",
+  "Source",
 ];
 
 const pad = (n: number, width = 2) => String(n).padStart(width, "0");
@@ -346,6 +358,7 @@ export function buildCsv(bills: Bill[]): string {
           rupees(c.netPaise),
           c.gstPercent != null ? String(c.gstPercent) : "",
           bill.paymentMethod,
+          billSourceLabel(bill.source),
         ]
           .map(csvField)
           .join(","),
@@ -465,6 +478,7 @@ export async function getBill(orderId: string): Promise<Bill | null> {
 export async function createBill(input: {
   lines: SaleLineInput[];
   paymentMethod: PaymentMethod;
+  source?: BillSource;
 }): Promise<Bill> {
   const lines = computeLines(input.lines);
   if (lines.length === 0) {
@@ -477,6 +491,7 @@ export async function createBill(input: {
     const bill: Bill = {
       orderId: genOrderId(now, bills),
       soldAt: now.toISOString(),
+      source: input.source ?? DEFAULT_BILL_SOURCE,
       paymentMethod: input.paymentMethod,
       lines,
       totals: computeTotals(lines),

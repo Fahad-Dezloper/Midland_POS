@@ -1,3 +1,4 @@
+import type { BillSource } from "./bill-source";
 import type { ItemCategory } from "./categories";
 import {
   MAX_PRICE_PAISE,
@@ -101,6 +102,8 @@ export type Bill = {
   soldAt: string;
   /** ISO timestamp of the last edit, if any. */
   updatedAt?: string;
+  /** Whether this was a normal store sale or an event sale. */
+  source: BillSource;
   paymentMethod: PaymentMethod;
   lines: SaleLine[];
   totals: BillTotals;

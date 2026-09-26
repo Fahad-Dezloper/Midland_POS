@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
+import { type BillSource, billSourceLabel } from "@/lib/bill-source";
 import { categoryLabel } from "@/lib/categories";
 import {
   MAX_DISCOUNT_PERCENT,
@@ -63,6 +64,17 @@ async function fetchBills(): Promise<Bill[]> {
   return Array.isArray(data.bills) ? data.bills : [];
 }
 
+/** Local calendar day of a bill as YYYY-MM-DD, so date filters match the
+ *  cashier's own timezone rather than UTC. Sorts lexically. */
+function localDateKey(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  const pad = (n: number) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+}
+
+type SourceFilter = "all" | BillSource;
+
 function billTotals(lines: { unitPricePaise: number; qty: number; discountPercent: number }[]) {
   let before = 0;
   let discount = 0;
@@ -82,6 +94,11 @@ export default function BillsManager() {
   const [edit, setEdit] = useState<EditState | null>(null);
   const [deletingId, setDeletingId] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+
+  // Filters (all client-side over the already-loaded list).
+  const [fromDate, setFromDate] = useState("");
+  const [toDate, setToDate] = useState("");
+  const [sourceFilter, setSourceFilter] = useState<SourceFilter>("all");
 
   const reload = useCallback(async () => {
     try {
@@ -230,9 +247,33 @@ export default function BillsManager() {
     }
   };
 
+  const filteredBills = useMemo(() => {
+    if (!bills) return null;
+    return bills.filter((b) => {
+      const src = b.source ?? "store";
+      if (sourceFilter !== "all" && src !== sourceFilter) return false;
+      if (fromDate || toDate) {
+        const key = localDateKey(b.soldAt);
+        if (fromDate && key < fromDate) return false;
+        if (toDate && key > toDate) return false;
+      }
+      return true;
+    });
+  }, [bills, sourceFilter, fromDate, toDate]);
+
+  const filtersActive =
+    sourceFilter !== "all" || fromDate !== "" || toDate !== "";
+
+  const clearFilters = () => {
+    setSourceFilter("all");
+    setFromDate("");
+    setToDate("");
+  };
+
   const grandTotal = useMemo(
-    () => (bills ? bills.reduce((s, b) => s + b.totals.afterPaise, 0) : 0),
-    [bills],
+    () =>
+      filteredBills ? filteredBills.reduce((s, b) => s + b.totals.afterPaise, 0) : 0,
+    [filteredBills],
   );
 
   const fieldClass =
@@ -244,7 +285,11 @@ export default function BillsManager() {
         <div className="text-sm text-neutral-500">
           {bills === null
             ? "Loading…"
-            : `${bills.length} bill${bills.length === 1 ? "" : "s"} · ${formatPaise(grandTotal)} total`}
+            : `${filteredBills?.length ?? 0}${
+                filtersActive ? ` of ${bills.length}` : ""
+              } bill${
+                (filteredBills?.length ?? 0) === 1 ? "" : "s"
+              } · ${formatPaise(grandTotal)} total`}
         </div>
         <div className="flex items-center gap-3">
           {notice && <span className="text-sm text-neutral-500">{notice}</span>}
@@ -266,6 +311,82 @@ export default function BillsManager() {
         </div>
       </div>
 
+      {/* Filters */}
+      <div className="flex shrink-0 flex-wrap items-center gap-3 rounded-xl border border-neutral-200 bg-neutral-50 px-3 py-2">
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+            Source
+          </span>
+          {(
+            [
+              ["all", "All"],
+              ["store", "Store"],
+              ["event", "Event"],
+            ] as const
+          ).map(([value, label]) => {
+            const selected = sourceFilter === value;
+            const isEvent = value === "event";
+            return (
+              <button
+                key={value}
+                type="button"
+                onClick={() => setSourceFilter(value)}
+                className={`rounded-lg border-2 px-3 py-1 text-sm font-medium transition ${
+                  selected
+                    ? isEvent
+                      ? "border-discount bg-discount text-white"
+                      : "border-accent bg-accent text-white"
+                    : "border-neutral-200 bg-white text-neutral-600 hover:border-accent/40"
+                }`}
+              >
+                {label}
+              </button>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-1.5">
+          <label
+            htmlFor="from-date"
+            className="text-xs font-medium uppercase tracking-wide text-neutral-500"
+          >
+            From
+          </label>
+          <input
+            id="from-date"
+            type="date"
+            value={fromDate}
+            max={toDate || undefined}
+            onChange={(e) => setFromDate(e.target.value)}
+            className="rounded-lg border border-neutral-300 bg-white px-2 py-1 text-sm tnum outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/30"
+          />
+          <label
+            htmlFor="to-date"
+            className="text-xs font-medium uppercase tracking-wide text-neutral-500"
+          >
+            To
+          </label>
+          <input
+            id="to-date"
+            type="date"
+            value={toDate}
+            min={fromDate || undefined}
+            onChange={(e) => setToDate(e.target.value)}
+            className="rounded-lg border border-neutral-300 bg-white px-2 py-1 text-sm tnum outline-none transition focus:border-accent focus:ring-2 focus:ring-accent/30"
+          />
+        </div>
+
+        {filtersActive && (
+          <button
+            type="button"
+            onClick={clearFilters}
+            className="rounded-lg border border-neutral-300 px-3 py-1 text-sm text-neutral-600 transition hover:bg-neutral-100"
+          >
+            Clear filters
+          </button>
+        )}
+      </div>
+
       {loadError && (
         <p className="shrink-0 rounded-lg bg-discount/10 px-3 py-2 text-sm text-discount">
           {loadError}
@@ -279,8 +400,17 @@ export default function BillsManager() {
           </div>
         )}
 
+        {bills &&
+          bills.length > 0 &&
+          filteredBills &&
+          filteredBills.length === 0 && (
+            <div className="rounded-2xl border border-neutral-200 bg-white p-10 text-center text-neutral-400">
+              No bills match these filters.
+            </div>
+          )}
+
         <ul className="flex flex-col gap-3">
-          {bills?.map((bill) => {
+          {filteredBills?.map((bill) => {
             const isEditing = edit?.orderId === bill.orderId;
             return (
               <li
@@ -290,8 +420,15 @@ export default function BillsManager() {
                 {/* Header row */}
                 <div className="flex flex-wrap items-center justify-between gap-3 p-4">
                   <div className="min-w-0">
-                    <div className="tnum text-sm font-semibold text-accent">
-                      {bill.orderId}
+                    <div className="flex items-center gap-2">
+                      <span className="tnum text-sm font-semibold text-accent">
+                        {bill.orderId}
+                      </span>
+                      {(bill.source ?? "store") === "event" && (
+                        <span className="rounded-full bg-discount/10 px-2 py-0.5 text-[10px] font-bold uppercase tracking-wide text-discount">
+                          {billSourceLabel("event")}
+                        </span>
+                      )}
                     </div>
                     <div className="text-xs text-neutral-500">
                       {new Date(bill.soldAt).toLocaleString("en-IN", {
